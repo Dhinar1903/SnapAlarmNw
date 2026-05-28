@@ -46,14 +46,18 @@ function useAlarmSound(playing) {
 
 function AlarmRinging({ alarm, onPhotoVerified }) {
   const [camState, setCamState] = useState("idle");
+  const [statusMessage, setStatusMessage] = useState("Kamera belum dibuka.");
   const [verifying, setVerifying] = useState(false);
   const [result, setResult] = useState(null);
   const [shake, setShake] = useState(false);
+  const [hidden, setHidden] = useState(false);
   const videoRef = useRef(null);
   const previewCanvasRef = useRef(null);
   const streamRef = useRef(null);
   const canvasRef = useRef(null);
   const rafRef = useRef(null);
+  const notifyIntervalRef = useRef(null);
+  const titleRef = useRef(document.title);
 
   useAlarmSound(camState !== "verified");
 
@@ -64,10 +68,16 @@ function AlarmRinging({ alarm, onPhotoVerified }) {
 
   const startCamera = async () => {
     try {
-      // helper to attempt getUserMedia with a given constraint
-      const tryGet = async (c) => await navigator.mediaDevices.getUserMedia(c);
+      setStatusMessage("Mencoba membuka kamera...");
+      setCamState("opening");
 
-      // Try facingMode first, then generic
+      if (!window.isSecureContext && !/localhost|127\.0\.0\.1/.test(window.location.hostname)) {
+        setStatusMessage("Kamera tidak bisa dibuka karena halaman belum HTTPS. Gunakan localhost atau jalankan dev server dengan HTTPS.");
+        setCamState("error");
+        return;
+      }
+
+      const tryGet = async (c) => await navigator.mediaDevices.getUserMedia(c);
       let stream;
       try {
         stream = await tryGet({ video: { facingMode: "environment" }, audio: false });
@@ -75,7 +85,6 @@ function AlarmRinging({ alarm, onPhotoVerified }) {
         try {
           stream = await tryGet({ video: true, audio: false });
         } catch (err2) {
-          // final attempt: enumerate devices and pick first videoinput
           const devices = await navigator.mediaDevices.enumerateDevices();
           const vid = devices.find(d => d.kind === 'videoinput');
           if (vid) {
@@ -85,45 +94,78 @@ function AlarmRinging({ alarm, onPhotoVerified }) {
       }
 
       streamRef.current = stream;
-      console.log('got stream', stream);
-      if (videoRef.current) {
-        const videoEl = videoRef.current;
-        videoEl.muted = true;
-        videoEl.playsInline = true;
-        videoEl.autoplay = true;
-        videoEl.onloadedmetadata = () => {
-          try {
-            const p = videoEl.play();
-            if (p && p.catch) p.catch(err => console.warn('video play() rejected', err));
-          } catch (err) {
-            console.warn('video play error', err);
-          }
-
-          const drawFrame = () => {
-            const canvasEl = previewCanvasRef.current;
-            if (!videoEl || !canvasEl) return;
-            if (videoEl.videoWidth > 0 && videoEl.videoHeight > 0) {
-              if (canvasEl.width !== videoEl.videoWidth || canvasEl.height !== videoEl.videoHeight) {
-                canvasEl.width = videoEl.videoWidth;
-                canvasEl.height = videoEl.videoHeight;
-              }
-              const ctx = canvasEl.getContext('2d');
-              ctx.drawImage(videoEl, 0, 0, canvasEl.width, canvasEl.height);
-            }
-            rafRef.current = requestAnimationFrame(drawFrame);
-          };
-
-          stopPreviewLoop();
-          rafRef.current = requestAnimationFrame(drawFrame);
-        };
-        videoEl.srcObject = stream;
-      }
+      setStatusMessage("Mempersiapkan kamera...");
       setCamState("open");
     } catch (e) {
       console.error('startCamera error', e);
+      setStatusMessage("Kamera tidak bisa dibuka. Periksa izin browser.");
       setCamState("error");
     }
   };
+
+  const tryNotify = (message) => {
+    if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+      new Notification('SnapAlarm', { body: message, silent: false });
+    }
+    if (navigator.vibrate) {
+      navigator.vibrate([250, 150, 250]);
+    }
+  };
+
+  const startAnnoyingMode = () => {
+    if (notifyIntervalRef.current) return;
+    notifyIntervalRef.current = setInterval(() => {
+      tryNotify(`Alarm ${alarm.label} masih bunyi! Kembali ke SnapAlarm sekarang.`);
+      setStatusMessage('Alarm masih aktif! Kembali ke halaman untuk mematikannya.');
+    }, 7000);
+  };
+
+  const stopAnnoyingMode = () => {
+    if (notifyIntervalRef.current) {
+      clearInterval(notifyIntervalRef.current);
+      notifyIntervalRef.current = null;
+    }
+  };
+
+  useEffect(() => {
+    const handleVisibility = () => {
+      const hiddenState = document.visibilityState !== 'visible';
+      setHidden(hiddenState);
+      if (hiddenState && camState !== 'verified') {
+        setStatusMessage('Alarm aktif! Kembali ke halaman SnapAlarm untuk menghentikannya.');
+        tryNotify(`Alarm ${alarm.label} masih bunyi, kembali ke SnapAlarm!`);
+        startAnnoyingMode();
+      } else if (!hiddenState && camState === 'open') {
+        setStatusMessage('Kamera siap. Arahkan objek dan tekan foto.');
+        startAnnoyingMode();
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibility);
+
+    const titleInterval = setInterval(() => {
+      if (camState !== 'verified' && hidden) {
+        document.title = document.title === '🔔 Alarm!' ? `⏰ ${alarm.label}` : '🔔 Alarm!';
+      }
+    }, 900);
+
+    if (camState !== 'verified') {
+      startAnnoyingMode();
+    }
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibility);
+      clearInterval(titleInterval);
+      stopAnnoyingMode();
+      document.title = titleRef.current;
+    };
+  }, [alarm.label, camState, hidden]);
+
+  useEffect(() => {
+    if (camState === 'opening' && typeof Notification !== 'undefined' && Notification.permission === 'default') {
+      Notification.requestPermission().catch(() => {});
+    }
+  }, [camState]);
 
   const stopPreviewLoop = () => {
     if (rafRef.current) {
@@ -134,11 +176,60 @@ function AlarmRinging({ alarm, onPhotoVerified }) {
 
   const stopCamera = () => {
     stopPreviewLoop();
+    stopAnnoyingMode();
     if (streamRef.current) {
       streamRef.current.getTracks().forEach(t => t.stop());
     }
     streamRef.current = null;
   };
+
+  useEffect(() => {
+    if (camState !== "open" || !streamRef.current || !videoRef.current) return;
+
+    const videoEl = videoRef.current;
+    videoEl.muted = true;
+    videoEl.playsInline = true;
+    videoEl.autoplay = true;
+
+    const startPreview = () => {
+      try {
+        const p = videoEl.play();
+        if (p && p.catch) p.catch(err => console.warn('video play() rejected', err));
+      } catch (err) {
+        console.warn('video play error', err);
+      }
+
+      const drawFrame = () => {
+        const canvasEl = previewCanvasRef.current;
+        if (!videoEl || !canvasEl) return;
+        if (videoEl.videoWidth > 0 && videoEl.videoHeight > 0) {
+          if (canvasEl.width !== videoEl.videoWidth || canvasEl.height !== videoEl.videoHeight) {
+            canvasEl.width = videoEl.videoWidth;
+            canvasEl.height = videoEl.videoHeight;
+          }
+          const ctx = canvasEl.getContext('2d');
+          ctx.drawImage(videoEl, 0, 0, canvasEl.width, canvasEl.height);
+        }
+        rafRef.current = requestAnimationFrame(drawFrame);
+      };
+
+      stopPreviewLoop();
+      rafRef.current = requestAnimationFrame(drawFrame);
+      setStatusMessage("Kamera siap. Arahkan objek dan tekan foto.");
+    };
+
+    const handleLoadedMetadata = () => {
+      startPreview();
+    };
+
+    videoEl.addEventListener('loadedmetadata', handleLoadedMetadata);
+    videoEl.srcObject = streamRef.current;
+
+    return () => {
+      videoEl.removeEventListener('loadedmetadata', handleLoadedMetadata);
+      stopPreviewLoop();
+    };
+  }, [camState]);
 
   useEffect(() => {
     return () => {
@@ -160,12 +251,18 @@ function AlarmRinging({ alarm, onPhotoVerified }) {
 
     setVerifying(true);
     setResult(null);
+    setStatusMessage("Sedang memverifikasi foto...");
 
     try {
       let answer = "NO";
-      if (USE_MOCK) {
+      const hasKey = Boolean(API_KEY);
+
+      if (USE_MOCK || !hasKey) {
         await new Promise(r => setTimeout(r, 800));
         answer = Math.random() < 0.5 ? "YES" : "NO";
+        if (!hasKey && !USE_MOCK) {
+          console.warn("Anthropic key tidak ditemukan, menggunakan mock verification.");
+        }
       } else {
         const res = await fetch("https://api.anthropic.com/v1/messages", {
           method: "POST",
@@ -189,14 +286,18 @@ function AlarmRinging({ alarm, onPhotoVerified }) {
       if (answer.startsWith("YES")) {
         setCamState("verified");
         setResult("success");
+        setStatusMessage("Foto terverifikasi. Alarm berhenti.");
         stopCamera();
         setTimeout(() => onPhotoVerified(), 1200);
       } else {
         setResult("fail");
+        setStatusMessage(`Bukan ${alarm.mission.target}. Coba lagi.`);
         setVerifying(false);
       }
     } catch (e) {
+      console.error('verify error', e);
       setResult("error");
+      setStatusMessage("Gagal memverifikasi. Coba lagi.");
       setVerifying(false);
     }
   };
@@ -228,6 +329,9 @@ function AlarmRinging({ alarm, onPhotoVerified }) {
       </div>
 
       <div style={{ flex: 1, padding: "20px", display: "flex", flexDirection: "column", gap: 14 }}>
+        <div style={{ color: "#94a3b8", fontSize: 13, textAlign: "center", minHeight: 24 }}>
+          {statusMessage}
+        </div>
         <div style={{ background: "#1e293b", borderRadius: 16, padding: "16px 18px" }}>
           <div style={{ fontSize: 12, color: "#64748b", marginBottom: 4 }}>MISI KAMU</div>
           <div style={{ fontSize: 18, fontWeight: 700, color: "white" }}>
@@ -483,11 +587,23 @@ function HomeScreen({ alarms, onDelete, onToggle, currentTime }) {
   );
 }
 
+const STORAGE_KEY = "snapalarm-alarms";
+
 export default function SnapAlarm() {
   const [screen, setScreen] = useState("home");
-  const [alarms, setAlarms] = useState([
-    { id: 1, time: "17:30", label: "Waktu mandi", mission: MISSIONS[0], active: true },
-  ]);
+  const [alarms, setAlarms] = useState(() => {
+    try {
+      const stored = window.localStorage.getItem(STORAGE_KEY);
+      if (stored) {
+        return JSON.parse(stored);
+      }
+    } catch (err) {
+      console.warn("Failed to load alarms from localStorage", err);
+    }
+    return [
+      { id: 1, time: "17:30", label: "Waktu mandi", mission: MISSIONS[0], active: true },
+    ];
+  });
   const [currentTime, setCurrentTime] = useState("");
   const [ringingAlarm, setRingingAlarm] = useState(null);
 
@@ -513,15 +629,52 @@ export default function SnapAlarm() {
   }, [alarms, ringingAlarm]);
 
   const addAlarm = (alarm) => {
-    setAlarms(prev => [...prev, alarm]);
+    setAlarms(prev => {
+      const next = [...prev, alarm];
+      try {
+        window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+      } catch (err) {
+        console.warn("Failed to save alarms to localStorage", err);
+      }
+      return next;
+    });
     setScreen("home");
   };
 
-  const deleteAlarm = (id) => setAlarms(prev => prev.filter(a => a.id !== id));
-  const toggleAlarm = (id) => setAlarms(prev => prev.map(a => a.id === id ? { ...a, active: !a.active } : a));
+  const deleteAlarm = (id) => {
+    setAlarms(prev => {
+      const next = prev.filter(a => a.id !== id);
+      try {
+        window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+      } catch (err) {
+        console.warn("Failed to save alarms to localStorage", err);
+      }
+      return next;
+    });
+  };
+
+  const toggleAlarm = (id) => {
+    setAlarms(prev => {
+      const next = prev.map(a => a.id === id ? { ...a, active: !a.active } : a);
+      try {
+        window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+      } catch (err) {
+        console.warn("Failed to save alarms to localStorage", err);
+      }
+      return next;
+    });
+  };
 
   const handleAlarmDismissed = () => {
-    setAlarms(prev => prev.map(a => a.id === ringingAlarm?.id ? { ...a, active: false } : a));
+    setAlarms(prev => {
+      const next = prev.map(a => a.id === ringingAlarm?.id ? { ...a, active: false } : a);
+      try {
+        window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+      } catch (err) {
+        console.warn("Failed to save alarms to localStorage", err);
+      }
+      return next;
+    });
     setRingingAlarm(null);
     setScreen("home");
   };

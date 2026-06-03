@@ -1,6 +1,9 @@
 import React from 'react'
 import { useState, useEffect, useRef, useCallback } from "react";
 
+const DAYS = ["Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu"];
+const DAY_EMOJIS = ["🟠", "🟡", "🟢", "🔵", "🟣", "🟤", "⚫"];
+
 const MISSIONS = [
   { id: "shower", label: "Mandi", emoji: "🚿", target: "handuk", hint: "Foto handukmu!", prompt: "Does this photo show a towel or bathroom item?" },
   { id: "study", label: "Belajar", emoji: "📚", target: "buku", hint: "Foto buku atau meja belajarmu!", prompt: "Does this photo show a book, notebook, or study desk?" },
@@ -12,7 +15,7 @@ const MISSIONS = [
 
 const SOUNDS = ["alarm_beep", "alarm_ring", "alarm_buzz"];
 
-function useAlarmSound(playing) {
+function useAlarmSound(playing, vibrateEnabled) {
   const ctxRef = useRef(null);
   const intervalRef = useRef(null);
 
@@ -31,7 +34,11 @@ function useAlarmSound(playing) {
       osc.start(ctx.currentTime);
       osc.stop(ctx.currentTime + 0.3);
     } catch (e) {}
-  }, []);
+
+    if (vibrateEnabled && navigator.vibrate) {
+      navigator.vibrate([400, 200, 400, 200, 400]);
+    }
+  }, [vibrateEnabled]);
 
   useEffect(() => {
     if (playing) {
@@ -44,7 +51,7 @@ function useAlarmSound(playing) {
   }, [playing, beep]);
 }
 
-function AlarmRinging({ alarm, onPhotoVerified }) {
+function AlarmRinging({ alarm, onPhotoVerified, vibrateEnabled, onToggleVibrate, onBack }) {
   const [camState, setCamState] = useState("idle");
   const [statusMessage, setStatusMessage] = useState("Kamera belum dibuka.");
   const [verifying, setVerifying] = useState(false);
@@ -59,7 +66,27 @@ function AlarmRinging({ alarm, onPhotoVerified }) {
   const notifyIntervalRef = useRef(null);
   const titleRef = useRef(document.title);
 
-  useAlarmSound(camState !== "verified");
+  useAlarmSound(camState !== "verified", vibrateEnabled);
+
+  useEffect(() => {
+    // Paksa window fokus dan kirim notifikasi aggressive saat alarm dimulai
+    try {
+      window.focus();
+    } catch (e) {}
+
+    if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+      new Notification(`⏰ ${alarm.label}`, {
+        body: `Waktunya ${alarm.label}! Ambil foto ${alarm.mission.target} sekarang!`,
+        tag: 'alarm-' + alarm.id,
+        requireInteraction: true,
+        silent: false
+      });
+    }
+
+    if (vibrateEnabled && navigator.vibrate) {
+      navigator.vibrate([500, 200, 500, 200, 500]);
+    }
+  }, [alarm.id, alarm.label, alarm.mission.target, vibrateEnabled]);
 
   useEffect(() => {
     const iv = setInterval(() => setShake(s => !s), 600);
@@ -304,6 +331,23 @@ function AlarmRinging({ alarm, onPhotoVerified }) {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", background: "#0a0a0a" }}>
+      {onBack && (
+        <div style={{ background: "#020617", padding: "12px 16px", display: "flex", justifyContent: "flex-start" }}>
+          <button
+            onClick={onBack}
+            style={{
+              background: "none",
+              border: "none",
+              color: "#94a3b8",
+              fontSize: 20,
+              cursor: "pointer",
+              padding: "4px 8px"
+            }}
+          >
+            ← Kembali
+          </button>
+        </div>
+      )}
       <div style={{
         background: result === "success" ? "#052e16" : "#1a0000",
         padding: "28px 20px 20px",
@@ -329,8 +373,25 @@ function AlarmRinging({ alarm, onPhotoVerified }) {
       </div>
 
       <div style={{ flex: 1, padding: "20px", display: "flex", flexDirection: "column", gap: 14 }}>
-        <div style={{ color: "#94a3b8", fontSize: 13, textAlign: "center", minHeight: 24 }}>
-          {statusMessage}
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+          <div style={{ color: "#94a3b8", fontSize: 13, minHeight: 24, flex: 1 }}>
+            {statusMessage}
+          </div>
+          <button
+            onClick={onToggleVibrate}
+            style={{
+              whiteSpace: "nowrap",
+              background: vibrateEnabled ? "#22c55e" : "#475569",
+              color: "white",
+              border: "none",
+              borderRadius: 999,
+              padding: "8px 12px",
+              fontSize: 12,
+              cursor: "pointer"
+            }}
+          >
+            {vibrateEnabled ? "🔔 Vibrate On" : "🔕 Vibrate Off"}
+          </button>
         </div>
         <div style={{ background: "#1e293b", borderRadius: 16, padding: "16px 18px" }}>
           <div style={{ fontSize: 12, color: "#64748b", marginBottom: 4 }}>MISI KAMU</div>
@@ -431,10 +492,11 @@ function SetAlarmScreen({ onSave, alarms }) {
   const [time, setTime] = useState("07:00");
   const [label, setLabel] = useState("Waktu mandi");
   const [mission, setMission] = useState(MISSIONS[0]);
+  const [dayIndex, setDayIndex] = useState(0);
   const [saved, setSaved] = useState(false);
 
   const handleSave = () => {
-    onSave({ id: Date.now(), time, label, mission, active: true });
+    onSave({ id: Date.now(), time, label, mission, dayIndex, active: true });
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
   };
@@ -469,6 +531,25 @@ function SetAlarmScreen({ onSave, alarms }) {
             borderRadius: 10, padding: "12px", color: "white", fontSize: 15, outline: "none"
           }}
         />
+      </div>
+
+      <div style={{ background: "#1e293b", borderRadius: 16, padding: "16px" }}>
+        <label style={{ fontSize: 12, color: "#64748b", display: "block", marginBottom: 12 }}>HARI (pilih hari alarm)</label>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 6 }}>
+          {DAYS.map((day, idx) => (
+            <button
+              key={idx}
+              onClick={() => setDayIndex(idx)}
+              style={{
+                padding: "10px 6px", borderRadius: 10, border: `2px solid ${dayIndex === idx ? "#3b82f6" : "#334155"}`,
+                background: dayIndex === idx ? "#1d3461" : "#0f172a",
+                color: "white", cursor: "pointer", textAlign: "center", fontSize: 12, fontWeight: 600, transition: "all 0.2s"
+              }}
+            >
+              {day}
+            </button>
+          ))}
+        </div>
       </div>
 
       <div style={{ background: "#1e293b", borderRadius: 16, padding: "16px" }}>
@@ -517,7 +598,9 @@ function SetAlarmScreen({ onSave, alarms }) {
 }
 
 function HomeScreen({ alarms, onDelete, onToggle, currentTime }) {
-  const nextAlarm = alarms.filter(a => a.active).sort((a, b) => a.time.localeCompare(b.time))[0];
+  const [selectedDay, setSelectedDay] = useState(new Date().getDay() === 0 ? 6 : new Date().getDay() - 1);
+  const todayAlarms = alarms.filter(a => a.dayIndex === selectedDay);
+  const nextAlarm = todayAlarms.filter(a => a.active).sort((a, b) => a.time.localeCompare(b.time))[0];
 
   return (
     <div style={{ padding: "20px", display: "flex", flexDirection: "column", gap: 16 }}>
@@ -537,16 +620,33 @@ function HomeScreen({ alarms, onDelete, onToggle, currentTime }) {
         )}
       </div>
 
-      <div style={{ fontSize: 12, color: "#64748b", fontWeight: 700, letterSpacing: 2 }}>ALARM KAMU ({alarms.length})</div>
+      <div style={{ display: "flex", gap: 8, overflowX: "auto", paddingBottom: 8, marginBottom: 8 }}>
+        {DAYS.map((day, idx) => (
+          <button
+            key={idx}
+            onClick={() => setSelectedDay(idx)}
+            style={{
+              padding: "8px 12px", borderRadius: 999, border: "none",
+              background: selectedDay === idx ? "#3b82f6" : "#1e293b",
+              color: selectedDay === idx ? "white" : "#94a3b8",
+              cursor: "pointer", fontSize: 12, fontWeight: 600, whiteSpace: "nowrap", transition: "all 0.2s"
+            }}
+          >
+            {day.slice(0, 3)}
+          </button>
+        ))}
+      </div>
 
-      {alarms.length === 0 && (
+      <div style={{ fontSize: 12, color: "#64748b", fontWeight: 700, letterSpacing: 2 }}>ALARM {DAYS[selectedDay].toUpperCase()} ({todayAlarms.length})</div>
+
+      {todayAlarms.length === 0 && (
         <div style={{ background: "#1e293b", borderRadius: 16, padding: "24px", textAlign: "center" }}>
           <div style={{ fontSize: 40, marginBottom: 10 }}>⏰</div>
           <div style={{ color: "#64748b", fontSize: 14 }}>Belum ada alarm. Tap + untuk buat alarm baru!</div>
         </div>
       )}
 
-      {alarms.map(alarm => (
+      {todayAlarms.map(alarm => (
         <div key={alarm.id} style={{
           background: "#1e293b", borderRadius: 16, padding: "16px 18px",
           display: "flex", alignItems: "center", gap: 14,
@@ -588,6 +688,7 @@ function HomeScreen({ alarms, onDelete, onToggle, currentTime }) {
 }
 
 const STORAGE_KEY = "snapalarm-alarms";
+const SETTINGS_KEY = "snapalarm-settings";
 
 export default function SnapAlarm() {
   const [screen, setScreen] = useState("home");
@@ -601,8 +702,19 @@ export default function SnapAlarm() {
       console.warn("Failed to load alarms from localStorage", err);
     }
     return [
-      { id: 1, time: "17:30", label: "Waktu mandi", mission: MISSIONS[0], active: true },
+      { id: 1, time: "17:30", label: "Waktu mandi", mission: MISSIONS[0], dayIndex: 0, active: true },
     ];
+  });
+  const [settings, setSettings] = useState(() => {
+    try {
+      const stored = window.localStorage.getItem(SETTINGS_KEY);
+      if (stored) {
+        return JSON.parse(stored);
+      }
+    } catch (err) {
+      console.warn("Failed to load settings from localStorage", err);
+    }
+    return { vibrateEnabled: true };
   });
   const [currentTime, setCurrentTime] = useState("");
   const [ringingAlarm, setRingingAlarm] = useState(null);
@@ -613,10 +725,11 @@ export default function SnapAlarm() {
       const hh = String(now.getHours()).padStart(2, "0");
       const mm = String(now.getMinutes()).padStart(2, "0");
       const timeStr = `${hh}:${mm}`;
+      const todayIndex = now.getDay() === 0 ? 6 : now.getDay() - 1;
       setCurrentTime(timeStr);
 
       if (!ringingAlarm) {
-        const triggered = alarms.find(a => a.active && a.time === timeStr);
+        const triggered = alarms.find(a => a.active && a.time === timeStr && a.dayIndex === todayIndex);
         if (triggered) {
           setRingingAlarm(triggered);
           setScreen("ringing");
@@ -679,8 +792,17 @@ export default function SnapAlarm() {
     setScreen("home");
   };
 
+  const saveSettings = (nextSettings) => {
+    setSettings(nextSettings);
+    try {
+      window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(nextSettings));
+    } catch (err) {
+      console.warn("Failed to save settings to localStorage", err);
+    }
+  };
+
   const testAlarm = () => {
-    const alarm = alarms[0] || { id: 999, time: currentTime, label: "Test alarm", mission: MISSIONS[0], active: true };
+    const alarm = alarms[0] || { id: 999, time: currentTime, label: "Test alarm", mission: MISSIONS[0], dayIndex: 0, active: true };
     setRingingAlarm(alarm);
     setScreen("ringing");
   };
@@ -713,7 +835,13 @@ export default function SnapAlarm() {
             <SetAlarmScreen onSave={addAlarm} alarms={alarms} />
           )}
           {screen === "ringing" && ringingAlarm && (
-            <AlarmRinging alarm={ringingAlarm} onPhotoVerified={handleAlarmDismissed} />
+            <AlarmRinging
+              alarm={ringingAlarm}
+              onPhotoVerified={handleAlarmDismissed}
+              vibrateEnabled={settings.vibrateEnabled}
+              onToggleVibrate={() => saveSettings({ ...settings, vibrateEnabled: !settings.vibrateEnabled })}
+              onBack={ringingAlarm.id === 999 ? () => { setScreen("home"); setRingingAlarm(null); } : null}
+            />
           )}
         </div>
 
